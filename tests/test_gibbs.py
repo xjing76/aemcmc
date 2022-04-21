@@ -6,12 +6,16 @@ from aesara.tensor.random.utils import RandomStream
 from scipy.linalg import toeplitz
 
 from aemcmc.gibbs import (
+    F_matrix_construct,
+    R_r,
     bernoulli_horseshoe_gibbs,
     bernoulli_horseshoe_match,
     bernoulli_horseshoe_model,
+    dispersion_term_model,
     horseshoe_match,
     horseshoe_model,
     nbinom_horseshoe_gibbs,
+    nbinom_horseshoe_gibbs_with_dispersion,
     nbinom_horseshoe_match,
     nbinom_horseshoe_model,
 )
@@ -119,6 +123,54 @@ def test_horseshoe_nbinom(srng):
     # sample from the posterior distributions
     num_samples = at.scalar("num_samples", dtype="int32")
     outputs, updates = nbinom_horseshoe_gibbs(srng, Y_rv, y, num_samples)
+    sample_fn = aesara.function((num_samples,), outputs, updates=updates)
+
+    beta, lmbda, tau = sample_fn(2000)
+
+    assert beta.shape == (2000, p)
+    assert lmbda.shape == (2000, p)
+    assert tau.shape == (2000, 1)
+
+    # test distribution domains
+    assert np.all(tau > 0)
+    assert np.all(lmbda > 0)
+
+
+def test_R_r(srng):
+    F = F_matrix_construct(10)
+    r_ = srng.gamma(1, 1)
+    R_r(F, r_, 4)
+
+
+def test_horseshoe_nbinom_w_dispersion(srng):
+    """
+    This test example is modified from section 3.2 of Makalic & Schmidt (2016)
+    """
+    h = 10
+    p = 10
+    N = 50
+
+    # generate synthetic data
+    true_beta = np.array([1, 1, 0, 0, 1] + [0] * (p - 5))
+    S = toeplitz(0.5 ** np.arange(p))
+    X = srng.multivariate_normal(np.zeros(p), cov=S, size=N)
+    y = srng.nbinom(h, at.sigmoid(-(X.dot(true_beta))))
+
+    # build the model
+    tau_rv = srng.halfcauchy(0, 1, size=1)
+    lambda_rv = srng.halfcauchy(0, 1, size=p)
+    beta_rv = srng.normal(0, tau_rv * lambda_rv, size=p)
+
+    eta_tt = X @ beta_rv
+    p_tt = at.sigmoid(-eta_tt)
+    r_rv = dispersion_term_model(srng)
+    Y_rv = srng.nbinom(r_rv, p_tt)
+
+    # sample from the posterior distributions
+    num_samples = at.scalar("num_samples", dtype="int32")
+    outputs, updates = nbinom_horseshoe_gibbs_with_dispersion(
+        srng, Y_rv, y, num_samples
+    )
     sample_fn = aesara.function((num_samples,), outputs, updates=updates)
 
     beta, lmbda, tau = sample_fn(2000)

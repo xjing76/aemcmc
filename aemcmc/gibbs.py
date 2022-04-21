@@ -2,6 +2,7 @@ from typing import Dict, List, Tuple, Union
 
 import aesara
 import aesara.tensor as at
+import numpy as np
 from aesara.graph import optimize_graph
 from aesara.graph.unify import eval_if_etuple
 from aesara.ifelse import ifelse
@@ -227,6 +228,114 @@ def nbinom_sigmoid_dot_match(
     return X, h, beta_rv
 
 
+def dispersion_term_model(srng):
+    h_rv = srng.gamma(1, 1, size=1)  # a_0 = 1
+    r_rv = srng.gamma(1, 1 / h_rv, size=1)  # b_0 = 1
+    return r_rv
+
+
+def F_matrix_construct(N):
+    """
+    function to create F matrix for sampling step of L_i
+
+    F matrix is a lower triangular matrix with F(1, 1) = 1, and F(m, j) =0 if j > m
+
+    Parameters
+    ----------
+    N
+        size of the matrix, defined by the maximum of the observation
+    """
+    # F = dok_matrix((N, N))
+    F = np.ndarray((N, N))
+    F[0, 0] = 1
+    for i in range(1, N):
+        for j in range(i + 1):
+            F[i, j] = i / (i + 1) * F[i - 1, j] + 1 / (i + 1) * F[i - 1, j - 1]
+    return F
+
+
+def R_r(F, r_, row):
+    n = F.shape[0]
+    F = at.as_tensor_variable(F)
+    dinominator = F[row, :] @ at.exp(at.log(r_) * np.arange(1, n + 1))
+    nominator = F[row, :] * at.exp(at.log(r_) * np.arange(1, n + 1))
+
+    return nominator / dinominator
+
+
+def sampling_for_li(srng, F, y, r):
+    N = F.shape[0]
+    # li = np.zeros(N)
+
+    # for i in at.arange(N):
+    #     li[i] = srng.choice(at.as_tensor_variable(np.arange(N)), size=1, replace=True, p=R_r(F, r, y[i]))
+    li = srng.choice(at.arange(N), size=N, replace=True, p=R_r(F, r, 10)).T
+    return at.as_tensor_variable(li)
+
+
+def dispersion_term_step(
+    srng: RandomStream,
+    r: TensorVariable,
+    l: TensorVariable,
+    p: TensorVariable,
+    F: TensorVariable,
+    y: TensorVariable,
+) -> Tuple[TensorVariable, TensorVariable]:
+    r"""Gibbs kernel to sample from the posterior distribution of a dispersion term r.
+
+    This kernel generates samples from the posterior distribution of the dispersion term
+    of negative binomial distribution ie, NB(r, p)
+
+    The approach here used the Compound Poisson representation for the sampling steps.
+
+    we used the following sampling steps for the posterior [1]
+
+    1. `r|  \sim Gamma(a_o + \Sum_{i=1}^N L_i, \frac{1}{h - \sum_{i=1}^N ln(1-p)})`
+    2. `Pr(L_i = j |-) == R_r(y_i, j )`, where ` R_r(m, j) = F(m , j) r^j/\sum_{j' = 1}^m(m, j') r^j`,
+     where `F(m, j)` a specific kind of matrix defined in the paper.
+     see `F_matrix_construct` for detail.
+    3. `h \sim Gamma(a_0+ b_0, 1/(g_0 + r))
+
+    Parameters
+    ----------
+    srng
+        The random number generating object to be used during sampling.
+    r
+        the dispersion parameter
+    l
+        The number terms of L/N of a Poisson distributed variable in Compound Poisson distribution
+    p
+        The probability term of i.i.d Logarithmic distributions of Compound Poisson distribution,
+        which is also the probability term in N(r, p)
+    F
+        F matrix for L_i sampling step, constant.
+    y
+        observations
+
+    References
+    ----------
+    ..[1] Zhou M, Li L, Dunson D, Carin L. Lognormal and Gamma Mixed Negative Binomial Regression.
+
+    """
+    h = srng.gamma(2, 1 / (1 + r))
+    r = srng.gamma(1 + l.sum(), 1 / (h - at.log(1 - p).sum()))
+    l = sampling_for_li(srng, F, y, r)
+    return r, l
+
+
+def nbinom_horseshoe_model_with_dispersion(srng: RandomStream) -> TensorVariable:
+    """Negative binomial regression model with a horseshoe shrinkage prior."""
+    X = at.matrix("X")
+
+    beta_rv = horseshoe_model(srng)
+    eta = X @ beta_rv
+    p = at.sigmoid(-eta)
+    r = dispersion_term_model(srng)
+    Y_rv = srng.nbinom(r, p)
+
+    return Y_rv
+
+
 def nbinom_horseshoe_model(srng: RandomStream) -> TensorVariable:
     """Negative binomial regression model with a horseshoe shrinkage prior."""
     X = at.matrix("X")
@@ -248,6 +357,16 @@ def nbinom_horseshoe_match(
     X, h, beta_rv = nbinom_sigmoid_dot_match(Y_rv)
     lmbda_rv, tau_rv = horseshoe_match(beta_rv)
     return h, X, beta_rv, lmbda_rv, tau_rv
+
+
+def nbinom_horseshoe_match_with_dispersion(
+    Y_rv: TensorVariable,
+) -> Tuple[
+    TensorVariable, TensorVariable, TensorVariable, TensorVariable, TensorVariable
+]:
+    X, r_rv, beta_rv = nbinom_sigmoid_dot_match(Y_rv)
+    lmbda_rv, tau_rv = horseshoe_match(beta_rv)
+    return X, beta_rv, lmbda_rv, tau_rv, r_rv
 
 
 def nbinom_horseshoe_gibbs(
@@ -357,6 +476,134 @@ def nbinom_horseshoe_gibbs(
         nbinom_horseshoe_step,
         outputs_info=[beta_rv, lmbda_rv, tau_rv],
         non_sequences=[y, X, h],
+        n_steps=num_samples,
+        strict=True,
+    )
+
+    return outputs, updates
+
+
+def nbinom_horseshoe_gibbs_with_dispersion(
+    srng: RandomStream, Y_rv: TensorVariable, y: TensorVariable, num_samples: int
+) -> Tuple[Union[TensorVariable, List[TensorVariable]], Dict]:
+    r"""Build a Gibbs sampler for the negative binomial regression with a horseshoe prior.
+
+    The implementation follows the sampler described in [1]. It is designed to
+    sample efficiently from the following negative binomial regression model:
+
+    .. math::
+
+        \begin{align*}
+            y_i &\sim \operatorname{NegativeBinomial}\left(\pi_i, h\right)\\
+            h &\sim \pi_h(h) \mathrm{d}h\\
+            \pi_i &= \frac{\exp(\psi_i)}{1 + \exp(\psi_i)}\\
+            \psi_i &= x^T \beta\\
+            \beta_j &\sim \operatorname{Normal}(0, \lambda_j^2\;\tau^2)\\
+            \lambda_j &\sim \operatorname{HalfCauchy}(0, 1)\\
+            \tau &\sim \operatorname{HalfCauchy}(0, 1)
+        \end{align*}
+
+
+    Parameters
+    ----------
+    srng: symbolic random number generator
+        The random number generating object to be used during sampling.
+    Y_rv
+        Model graph.
+    y: TensorVariable
+        The observed count data.
+    n_samples: TensorVariable
+        A tensor describing the number of posterior samples to generate.
+
+    Returns
+    -------
+    (outputs, updates): tuple
+        A symbolic description of the sampling result to be used to
+        compile a sampling function.
+
+    Notes
+    -----
+    The ``z`` expression in section 2.2 of [1] seems to
+    omit division by the Polya-Gamma auxilliary variables whereas [2] and [3]
+    explicitely include it. We found that including the division results in
+    accurate posterior samples for the regression coefficients. It is also
+    worth noting that the :math:`\sigma^2` parameter is not sampled directly
+    in the negative binomial regression problem and thus set to 1 [2].
+
+    References
+    ----------
+    ..[1] Makalic, Enes & Schmidt, Daniel. (2015). A Simple Sampler for the
+          Horseshoe Estimator. 10.1109/LSP.2015.2503725.
+    ..[2] Makalic, Enes & Schmidt, Daniel. (2016). High-Dimensional Bayesian
+          Regularised Regression with the BayesReg Package.
+    ..[3] Neelon, Brian. (2019). Bayesian Zero-Inflated Negative Binomial
+          Regression Based on Pólya-Gamma Mixtures. Bayesian Anal.
+          2019 September ; 14(3): 829–855. doi:10.1214/18-ba1132.
+
+    """
+    N = y.max().eval()
+    F = F_matrix_construct(N)
+
+    def nbinom_horseshoe_step(
+        beta: TensorVariable,
+        lmbda: TensorVariable,
+        tau: TensorVariable,
+        r: TensorVariable,
+        l: TensorVariable,
+        y: TensorVariable,
+        X: TensorVariable,
+    ) -> Tuple[
+        TensorVariable, TensorVariable, TensorVariable, TensorVariable, TensorVariable
+    ]:
+        """Complete one full update of the gibbs sampler and return the new state
+        of the posterior conditional parameters.
+
+        Parameters
+        ----------
+        beta: Tensorvariable
+            Coefficients (other than intercept) of the regression model.
+        lmbda
+            Inverse of the local shrinkage parameter of the horseshoe prior.
+        tau
+            Inverse of the global shrinkage parameters of the horseshoe prior.
+        y: TensorVariable
+            The observed count data.
+        X: TensorVariable
+            The covariate matrix.
+        r: TensorVariable
+            The "number of successes" parameter of the negative binomial disribution
+            used to model the data.
+
+        """
+        xb = X @ beta
+        w = srng.gen(polyagamma, y + r, xb)
+        z = 0.5 * (y - r) / w
+
+        lmbda_inv = 1.0 / lmbda
+        tau_inv = 1.0 / tau
+        beta_new = update_beta(srng, w, lmbda_inv * tau_inv, X, z)
+
+        lmbda_inv_new, tau_inv_new = horseshoe_step(
+            srng, beta_new, 1.0, lmbda_inv, tau_inv
+        )
+        eta = X @ beta_new
+        p = at.sigmoid(-eta)
+
+        r_new, l_new = dispersion_term_step(srng, r, l, p, F, y)
+
+        return beta_new, 1.0 / lmbda_inv_new, 1.0 / tau_inv_new, r_new, l_new
+
+    X, beta_rv, lmbda_rv, tau_rv, r_rv = nbinom_horseshoe_match_with_dispersion(Y_rv)
+
+    # init l_rv from p
+    eta = X @ beta_rv
+    p = at.sigmoid(-eta)
+    l_rv = srng.poisson(-r_rv * at.log(1 - p))
+
+    outputs, updates = aesara.scan(
+        nbinom_horseshoe_step,
+        outputs_info=[beta_rv, lmbda_rv, tau_rv, r_rv, l_rv],
+        non_sequences=[y, X],
         n_steps=num_samples,
         strict=True,
     )
