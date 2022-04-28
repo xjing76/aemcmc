@@ -137,7 +137,7 @@ def test_horseshoe_nbinom(srng):
 
 
 def test_R_r(srng):
-    F = F_matrix_construct(10)
+    F = F_matrix_construct(50)
     r_ = srng.gamma(1, 1)
     R_r(F, r_, 4)
 
@@ -146,12 +146,12 @@ def test_horseshoe_nbinom_w_dispersion(srng):
     """
     This test example is modified from section 3.2 of Makalic & Schmidt (2016)
     """
-    h = 10
+    h = 1
     p = 10
     N = 50
 
     # generate synthetic data
-    true_beta = np.array([1, 1, 0, 0, 1] + [0] * (p - 5))
+    true_beta = np.array([1, 0, 0, 0, 1] + [0] * (p - 5))
     S = toeplitz(0.5 ** np.arange(p))
     X = srng.multivariate_normal(np.zeros(p), cov=S, size=N)
     y = srng.nbinom(h, at.sigmoid(-(X.dot(true_beta))))
@@ -171,7 +171,9 @@ def test_horseshoe_nbinom_w_dispersion(srng):
     outputs, updates = nbinom_horseshoe_gibbs_with_dispersion(
         srng, Y_rv, y, num_samples
     )
+    
     sample_fn = aesara.function((num_samples,), outputs, updates=updates)
+    
 
     beta, lmbda, tau = sample_fn(2000)
 

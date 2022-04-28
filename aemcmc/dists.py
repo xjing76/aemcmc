@@ -2,6 +2,7 @@ import aesara
 import aesara.tensor as at
 import numpy as np
 from aesara.sparse.basic import _is_sparse_variable, dense_from_sparse
+from aesara.tensor.random.basic import ChoiceRV
 from aesara.tensor.random.op import RandomVariable
 from polyagamma import random_polyagamma
 
@@ -25,6 +26,54 @@ class PolyaGammaRV(RandomVariable):
 
 
 polyagamma = PolyaGammaRV()
+
+
+def _choice(a, replace, p, size=None, rng=None):
+    return rng.choice(
+        a, size=size, replace=replace, p=p
+    )
+
+vec_choice = np.vectorize(_choice,
+    otypes=[int],
+    excluded={"size", "rng"},
+    signature="(m),(),(m)->()",
+)
+
+
+class MultiChoiceRV(ChoiceRV):
+    name = "multichoice"
+    ndim_supp = 1
+    _print_name = ("multichoice", "\\operatorname{multichoice}")
+
+    @classmethod
+    def rng_fn(cls, rng, a, p, replace=True, size=None):
+        if a.shape == (1, 1):
+            a = a[0]
+        if a.ndim > 0 or p.ndim > 1:
+            a, p = at.random.utils.broadcast_params([a, p], cls.ndims_params)
+            size = tuple(size or ())
+
+            res = np.empty((p.shape[0], size[0]), dtype=a.dtype)
+            for idx in np.ndindex(p.shape[:-1]):
+                a_arg = a[idx]
+                if len(a[idx]) == 1:
+                    a_arg = a_arg[0]
+                res[idx] = rng.choice(a_arg, size, replace, p[idx])
+            return res
+        else:
+            return rng.choice(a, size, replace, p[idx])
+
+        # return vec_choice(a, replace, p, size=size, rng=rng)
+
+    def _supp_shape_from_params(self, dist_params, rep_param_idx=1, param_shapes=None):
+        breakpoint()
+        return at.random.op.default_supp_shape_from_params(
+        self.ndim_supp, dist_params, rep_param_idx, param_shapes
+    )
+
+
+
+multichoice = MultiChoiceRV()
 
 
 def multivariate_normal_rue2005(rng, b, Q):

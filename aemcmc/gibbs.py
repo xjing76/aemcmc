@@ -13,6 +13,7 @@ from etuples import etuple, etuplize
 from unification import unify, var
 
 from aemcmc.dists import (
+    multichoice,
     multivariate_normal_cong2017,
     multivariate_normal_rue2005,
     polyagamma,
@@ -245,8 +246,7 @@ def F_matrix_construct(N):
     N
         size of the matrix, defined by the maximum of the observation
     """
-    # F = dok_matrix((N, N))
-    F = np.ndarray((N, N))
+    F = np.zeros((N, N))
     F[0, 0] = 1
     for i in range(1, N):
         for j in range(i + 1):
@@ -256,21 +256,20 @@ def F_matrix_construct(N):
 
 def R_r(F, r_, row):
     n = F.shape[0]
+    if row == 0:
+        return F[0, :]
     F = at.as_tensor_variable(F)
-    dinominator = F[row, :] @ at.exp(at.log(r_) * np.arange(1, n + 1))
-    nominator = F[row, :] * at.exp(at.log(r_) * np.arange(1, n + 1))
-
+    r_factor = at.exp(at.log(r_) * at.arange(1, n + 1))
+    r_factor = at.switch(at.lt(r_factor, 1), r_factor, 1)
+    dinominator = F[row - 1, :] @ r_factor
+    nominator = F[row - 1, :] * r_factor
     return nominator / dinominator
 
 
 def sampling_for_li(srng, F, y, r):
     N = F.shape[0]
-    # li = np.zeros(N)
-
-    # for i in at.arange(N):
-    #     li[i] = srng.choice(at.as_tensor_variable(np.arange(N)), size=1, replace=True, p=R_r(F, r, y[i]))
-    li = srng.choice(at.arange(N), size=N, replace=True, p=R_r(F, r, 10)).T
-    return at.as_tensor_variable(li)
+    li = srng.gen(multichoice, np.arange(N), 1, True, R_r(F, r, y)).T[0].squeeze()
+    return li
 
 
 def dispersion_term_step(
@@ -319,7 +318,7 @@ def dispersion_term_step(
     """
     h = srng.gamma(2, 1 / (1 + r))
     r = srng.gamma(1 + l.sum(), 1 / (h - at.log(1 - p).sum()))
-    l = sampling_for_li(srng, F, y, r)
+    l = sampling_for_li(srng, F, y, r).astype(aesara.config.floatX)
     return r, l
 
 
@@ -332,7 +331,6 @@ def nbinom_horseshoe_model_with_dispersion(srng: RandomStream) -> TensorVariable
     p = at.sigmoid(-eta)
     r = dispersion_term_model(srng)
     Y_rv = srng.nbinom(r, p)
-
     return Y_rv
 
 
@@ -467,7 +465,6 @@ def nbinom_horseshoe_gibbs(
         lmbda_inv_new, tau_inv_new = horseshoe_step(
             srng, beta_new, 1.0, lmbda_inv, tau_inv
         )
-
         return beta_new, 1.0 / lmbda_inv_new, 1.0 / tau_inv_new
 
     h, X, beta_rv, lmbda_rv, tau_rv = nbinom_horseshoe_match(Y_rv)
@@ -598,7 +595,7 @@ def nbinom_horseshoe_gibbs_with_dispersion(
     # init l_rv from p
     eta = X @ beta_rv
     p = at.sigmoid(-eta)
-    l_rv = srng.poisson(-r_rv * at.log(1 - p))
+    l_rv = srng.poisson(-r_rv * at.log(1 - p), size=N).astype(aesara.config.floatX)
 
     outputs, updates = aesara.scan(
         nbinom_horseshoe_step,

@@ -6,6 +6,7 @@ from aesara.sparse.basic import as_sparse
 from scipy.sparse import csc_matrix
 
 from aemcmc.dists import (
+    multichoice,
     multivariate_normal_bhattacharya2016,
     multivariate_normal_cong2017,
     multivariate_normal_rue2005,
@@ -29,6 +30,25 @@ def test_polyagamma():
     rng2 = at.random.RandomStream(12345)
     res2 = rng2.gen(polyagamma)
     assert res1.eval() == res2.eval()
+
+
+
+def test_multichoice():
+
+    rng1 = at.random.RandomStream(12345)
+    p_val = np.stack([np.repeat(0.1, 10)] * 3, axis=0)
+    res1 = rng1.gen(multichoice, np.array(10, dtype = np.int64), 1, True, p_val)
+    
+    rng2 = at.random.RandomStream(12345)
+    res2 = rng2.gen(multichoice, np.array(10, dtype = np.int64), 1, True, p_val)
+    # add assersion fpr results
+    assert np.alltrue(res1.eval() == res2.eval())
+    assert res1.eval().dtype == "int64"
+    
+
+    res3 = rng1.gen(multichoice, np.arange(10), 2, True, p_val)
+    # breakpoint()
+    assert np.all(res3.shape.eval() == np.array([3, 2]))
 
 
 def test_multivariate_normal_rue2005():
