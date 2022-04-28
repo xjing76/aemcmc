@@ -171,19 +171,23 @@ def test_horseshoe_nbinom_w_dispersion(srng):
     outputs, updates = nbinom_horseshoe_gibbs_with_dispersion(
         srng, Y_rv, y, num_samples
     )
-    
+
     sample_fn = aesara.function((num_samples,), outputs, updates=updates)
-    
 
-    beta, lmbda, tau = sample_fn(2000)
+    sample_num = 2000
+    beta, lmbda, tau, r, l_i = sample_fn(sample_num)
 
-    assert beta.shape == (2000, p)
-    assert lmbda.shape == (2000, p)
-    assert tau.shape == (2000, 1)
+    assert beta.shape == (sample_num, p)
+    assert lmbda.shape == (sample_num, p)
+    assert tau.shape == (sample_num, 1)
+    assert r.shape == (sample_num, 1)
+    assert l_i.shape == (sample_num, N)
 
     # test distribution domains
     assert np.all(tau > 0)
     assert np.all(lmbda > 0)
+    assert np.all(r > 0)
+    assert np.all(l_i >= 0)
 
 
 def test_match_bernoulli_horseshoe(srng):

@@ -268,7 +268,7 @@ def R_r(F, r_, row):
 
 def sampling_for_li(srng, F, y, r):
     N = F.shape[0]
-    li = srng.gen(multichoice, np.arange(N), 1, True, R_r(F, r, y)).T[0].squeeze()
+    li = srng.gen(multichoice, N, 1, True, R_r(F, r, y)).T[0].squeeze()
     return li
 
 
@@ -316,8 +316,8 @@ def dispersion_term_step(
     ..[1] Zhou M, Li L, Dunson D, Carin L. Lognormal and Gamma Mixed Negative Binomial Regression.
 
     """
-    h = srng.gamma(2, 1 / (1 + r))
-    r = srng.gamma(1 + l.sum(), 1 / (h - at.log(1 - p).sum()))
+    h = srng.gamma(1e-2 + 1 * 1e-2, 1 / (1e-2 + r))
+    r = srng.gamma(1e-2 + l.sum(), 1 / (h - at.log(1 - p).sum()))
     l = sampling_for_li(srng, F, y, r).astype(aesara.config.floatX)
     return r, l
 

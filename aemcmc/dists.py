@@ -28,18 +28,6 @@ class PolyaGammaRV(RandomVariable):
 polyagamma = PolyaGammaRV()
 
 
-def _choice(a, replace, p, size=None, rng=None):
-    return rng.choice(
-        a, size=size, replace=replace, p=p
-    )
-
-vec_choice = np.vectorize(_choice,
-    otypes=[int],
-    excluded={"size", "rng"},
-    signature="(m),(),(m)->()",
-)
-
-
 class MultiChoiceRV(ChoiceRV):
     name = "multichoice"
     ndim_supp = 1
@@ -54,9 +42,9 @@ class MultiChoiceRV(ChoiceRV):
             size = tuple(size or ())
 
             res = np.empty((p.shape[0], size[0]), dtype=a.dtype)
-            for idx in np.ndindex(p.shape[:-1]):
+            for idx in np.ndindex(p.shape[0]):
                 a_arg = a[idx]
-                if len(a[idx]) == 1:
+                if isinstance(a_arg, np.ndarray) and a_arg.shape[0] == 1:
                     a_arg = a_arg[0]
                 res[idx] = rng.choice(a_arg, size, replace, p[idx])
             return res
@@ -66,10 +54,23 @@ class MultiChoiceRV(ChoiceRV):
         # return vec_choice(a, replace, p, size=size, rng=rng)
 
     def _supp_shape_from_params(self, dist_params, rep_param_idx=1, param_shapes=None):
-        breakpoint()
+        param_shapes = [None, dist_params[rep_param_idx][:, 0].shape, None]
         return at.random.op.default_supp_shape_from_params(
         self.ndim_supp, dist_params, rep_param_idx, param_shapes
     )
+
+    def _infer_shape(self, size, dist_params, param_shapes=None):
+        size_len = at.get_vector_length(size)
+        if size_len > 0:
+            if self.ndim_supp == 0:
+                return size
+            else:
+                supp_shape = self._supp_shape_from_params(
+                    dist_params, param_shapes=param_shapes
+                )
+                return tuple(supp_shape) + tuple(size)
+
+        return size
 
 
 
