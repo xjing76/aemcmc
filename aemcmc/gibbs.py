@@ -90,6 +90,8 @@ def horseshoe_model(srng: TensorVariable) -> TensorVariable:
 
 
 def horseshoe_match(graph: TensorVariable) -> Tuple[TensorVariable, TensorVariable]:
+    if isinstance(graph, at.TensorConstant):
+        return at.as_tensor_variable([1]), at.as_tensor_variable([1])
     graph_opt = optimize_graph(graph)
     graph_et = etuplize(graph_opt)
 
@@ -316,8 +318,8 @@ def dispersion_term_step(
     ..[1] Zhou M, Li L, Dunson D, Carin L. Lognormal and Gamma Mixed Negative Binomial Regression.
 
     """
-    h = srng.gamma(1e-2 + 1 * 1e-2, 1 / (1e-2 + r))
-    r = srng.gamma(1e-2 + l.sum(), 1 / (h - at.log(1 - p).sum()))
+    h = srng.gamma(1 + 1, 1 / (1e-2 + r))
+    r = srng.gamma(1 + l.sum(), 1 / (h - at.log(1 - p).sum()))
     l = sampling_for_li(srng, F, y, r).astype(aesara.config.floatX)
     return r, l
 
@@ -541,65 +543,25 @@ def nbinom_horseshoe_gibbs_with_dispersion(
     N = y.max().eval()
     F = F_matrix_construct(N)
 
+    X, r_rv, beta = nbinom_sigmoid_dot_match(Y_rv)
+    eta = X @ beta
+    p = at.sigmoid(-eta)
+
     def nbinom_horseshoe_step(
-        beta: TensorVariable,
-        lmbda: TensorVariable,
-        tau: TensorVariable,
         r: TensorVariable,
         l: TensorVariable,
         y: TensorVariable,
         X: TensorVariable,
-    ) -> Tuple[
-        TensorVariable, TensorVariable, TensorVariable, TensorVariable, TensorVariable
-    ]:
-        """Complete one full update of the gibbs sampler and return the new state
-        of the posterior conditional parameters.
-
-        Parameters
-        ----------
-        beta: Tensorvariable
-            Coefficients (other than intercept) of the regression model.
-        lmbda
-            Inverse of the local shrinkage parameter of the horseshoe prior.
-        tau
-            Inverse of the global shrinkage parameters of the horseshoe prior.
-        y: TensorVariable
-            The observed count data.
-        X: TensorVariable
-            The covariate matrix.
-        r: TensorVariable
-            The "number of successes" parameter of the negative binomial disribution
-            used to model the data.
-
-        """
-        xb = X @ beta
-        w = srng.gen(polyagamma, y + r, xb)
-        z = 0.5 * (y - r) / w
-
-        lmbda_inv = 1.0 / lmbda
-        tau_inv = 1.0 / tau
-        beta_new = update_beta(srng, w, lmbda_inv * tau_inv, X, z)
-
-        lmbda_inv_new, tau_inv_new = horseshoe_step(
-            srng, beta_new, 1.0, lmbda_inv, tau_inv
-        )
-        eta = X @ beta_new
-        p = at.sigmoid(-eta)
-
+    ) -> Tuple[TensorVariable, TensorVariable]:
         r_new, l_new = dispersion_term_step(srng, r, l, p, F, y)
 
-        return beta_new, 1.0 / lmbda_inv_new, 1.0 / tau_inv_new, r_new, l_new
+        return r_new, l_new
 
-    X, beta_rv, lmbda_rv, tau_rv, r_rv = nbinom_horseshoe_match_with_dispersion(Y_rv)
-
-    # init l_rv from p
-    eta = X @ beta_rv
-    p = at.sigmoid(-eta)
     l_rv = srng.poisson(-r_rv * at.log(1 - p), size=N).astype(aesara.config.floatX)
 
     outputs, updates = aesara.scan(
         nbinom_horseshoe_step,
-        outputs_info=[beta_rv, lmbda_rv, tau_rv, r_rv, l_rv],
+        outputs_info=[r_rv, l_rv],
         non_sequences=[y, X],
         n_steps=num_samples,
         strict=True,

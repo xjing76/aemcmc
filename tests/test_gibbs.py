@@ -156,12 +156,7 @@ def test_horseshoe_nbinom_w_dispersion(srng):
     X = srng.multivariate_normal(np.zeros(p), cov=S, size=N)
     y = srng.nbinom(h, at.sigmoid(-(X.dot(true_beta))))
 
-    # build the model
-    tau_rv = srng.halfcauchy(0, 1, size=1)
-    lambda_rv = srng.halfcauchy(0, 1, size=p)
-    beta_rv = srng.normal(0, tau_rv * lambda_rv, size=p)
-
-    eta_tt = X @ beta_rv
+    eta_tt = X @ at.as_tensor_variable(true_beta)
     p_tt = at.sigmoid(-eta_tt)
     r_rv = dispersion_term_model(srng)
     Y_rv = srng.nbinom(r_rv, p_tt)
@@ -175,17 +170,12 @@ def test_horseshoe_nbinom_w_dispersion(srng):
     sample_fn = aesara.function((num_samples,), outputs, updates=updates)
 
     sample_num = 2000
-    beta, lmbda, tau, r, l_i = sample_fn(sample_num)
+    r, l_i = sample_fn(sample_num)
 
-    assert beta.shape == (sample_num, p)
-    assert lmbda.shape == (sample_num, p)
-    assert tau.shape == (sample_num, 1)
     assert r.shape == (sample_num, 1)
     assert l_i.shape == (sample_num, N)
 
     # test distribution domains
-    assert np.all(tau > 0)
-    assert np.all(lmbda > 0)
     assert np.all(r > 0)
     assert np.all(l_i >= 0)
 
